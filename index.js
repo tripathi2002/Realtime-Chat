@@ -14,7 +14,8 @@ const PORT = process.env.PORT || 8000;
 const io = socketIo(server);
 
 // Serve static files (if you have any assets like JS, CSS, images)
-app.use(express.static('public'));
+app.use('/public', express.static('public'));
+app.use(express.static('frontend'));
 
 // const io = socketIo(8000)
 // Route to serve your HTML file
