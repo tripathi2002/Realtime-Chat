@@ -1,4 +1,10 @@
-const socket = io('http://localhost:8000') 
+// const socket = io('http://localhost:8000') 
+const socket = io('https://vibhu-dev.xyz')
+// const socket = io('https://vibhu-dev.xyz/app4') 
+// const socket = io('https://vibhu-dev.xyz/app4') 
+// const socket = io('https://vibhu-dev.xyz', {
+//   transports: ['websocket'],  // Force WebSocket transport (this avoids polling)
+// });
 
 const form = document.getElementById('send-container'); 
 const messageInput = document.getElementById('messageInp'); 
