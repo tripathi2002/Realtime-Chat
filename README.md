@@ -1,43 +1,44 @@
 # Realtime Chat — Frontend
 
-Vanilla HTML/CSS/JS client for the realtime group chat app. Connects to the Socket.IO backend to send and receive messages.
-
-## Features
-
-- Real-time messaging over WebSockets (Socket.IO client)
-- Join / leave notifications
-- Notification sound asset in `public/noti.wav`
-- Static site (no Node server required)
+Static HTML/CSS/JS chat UI. Talks to the PHP poll API (no Socket.IO).
 
 ## Project structure
 
 ```
-index.html        # chat UI
-js/client.js      # Socket.IO client
+index.html
+js/config.js      # API base URL
+js/client.js      # join / send / poll loop
 css/style.css
 images/vat.png
 public/noti.wav
-Dockerfile        # nginx static server
-.env.example
+.htaccess
+.github/workflows/deploy.yml
 ```
 
-## Getting started
+## Local development
 
-Open `index.html` in a browser, or serve the folder with any static file server:
+1. Run the PHP API locally (`php -S localhost:8000` in `../backend`).
+2. Point the client at it:
+
+```js
+// js/config.js
+window.CHAT_API_BASE_URL = 'http://localhost:8000';
+```
+
+3. Serve this folder:
 
 ```bash
 npx serve .
 ```
 
-> `js/client.js` points at a hosted Socket.IO URL. For local development, switch it to the commented `http://localhost:8000` line and run the backend.
+## Auto deploy (Hostinger)
 
-With Docker:
+Push to `ui/v2`. GitHub Actions FTPs to:
 
-```bash
-docker build -t realtime-chat-frontend .
-docker run -p 8080:80 realtime-chat-frontend
-```
+`sit/realtime-chat/ui/v2/`
 
-## Environment variables
+Required repo secrets: `FTP_HOST`, `FTP_USER`, `FTP_PASSWORD`.
 
-`SOCKET_SERVER_URL` — document the Socket.IO server the client should use (set in `js/client.js` for now).
+## Live URL
+
+`https://vibhu.pro/sit/realtime-chat/ui/v2/`
