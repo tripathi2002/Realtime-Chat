@@ -1,44 +1,28 @@
 # Realtime Chat — Frontend
 
-Static HTML/CSS/JS chat UI aligned with the vibhu.pro portfolio design system (accent, typography, forms). Talks to the PHP poll API.
+Portfolio-styled chat UI with SSE live updates, session restore, and reconnect.
 
-## Project structure
+## Features
 
-```
-index.html
-js/config.js      # API base URL
-js/client.js      # join screen / send / poll loop
-css/style.css     # portfolio design tokens
-images/vat.png
-public/noti.wav
-.htaccess
-.github/workflows/deploy.yml
-```
+- SSE stream (`/stream`) with long-poll fallback
+- Auto-reconnect with exponential backoff
+- Message history on join/resume
+- Unique display names
+- `sessionStorage` session restore (survives refresh)
+- Serial send queue, retry on failure
+- Empty state, timestamps, avatars, date dividers
+- Mobile-first composer, jump-to-latest, reconnect banner
+- Dark mode + mute toggle
+- `noindex` for SIT
 
-## Local development
-
-1. Run the PHP API locally (`php -S localhost:8000` in `../backend`).
-2. Point the client at it:
-
-```js
-// js/config.js
-window.CHAT_API_BASE_URL = 'http://localhost:8000';
-```
-
-3. Serve this folder:
+## Local
 
 ```bash
 npx serve .
 ```
 
-## Auto deploy (Hostinger)
+Point `js/config.js` at your local PHP API if needed.
 
-Push to `ui/v2`. GitHub Actions FTPs to:
+## Deploy
 
-`sit/realtime-chat/ui/v2/`
-
-Required repo secrets: `FTP_HOST`, `FTP_USER`, `FTP_PASSWORD`.
-
-## Live URL
-
-`https://vibhu.pro/sit/realtime-chat/ui/v2/`
+Push `ui/v2`. Optional repo variable/secret `CHAT_API_BASE_URL` is injected into `js/config.js` at deploy time.

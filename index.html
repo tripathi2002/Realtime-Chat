@@ -3,26 +3,35 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#009bdf" />
+    <meta name="theme-color" content="#009bdf" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)" />
+    <meta name="robots" content="noindex,nofollow" />
     <meta
       name="description"
       content="v-chat — a realtime group chat by Vibhu Tripathi."
     />
-    <title>v-chat · Vibhu</title>
+    <title>v-chat</title>
+    <link rel="icon" href="images/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Playfair+Display:wght@700;800&family=Plus+Jakarta+Sans:wght@700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="css/style.css" />
   </head>
   <body>
     <div class="app">
+      <div class="reconnect" id="reconnectBanner" hidden role="status">
+        <span id="reconnectText">Reconnecting…</span>
+        <button class="btn btn--outline btn--small" id="retryBtn" type="button">Retry</button>
+      </div>
+
       <header class="site-header">
         <div class="site-header__inner">
-          <a class="site-header__brand" href="./" aria-label="v-chat home">
-            <img src="images/vat.png" alt="v-chat" width="120" height="40" />
+          <a class="brand" href="./" aria-label="v-chat home">
+            <span class="brand__mark" aria-hidden="true">v</span>
+            <span class="brand__text">v-chat</span>
           </a>
           <div class="site-header__meta">
             <span class="status" id="connectionStatus" data-state="idle">
@@ -30,6 +39,24 @@
               <span class="status__label">Offline</span>
             </span>
             <span class="site-header__user" id="userBadge" hidden></span>
+            <button
+              class="icon-btn"
+              id="muteBtn"
+              type="button"
+              aria-pressed="false"
+              title="Mute notifications"
+            >
+              🔊
+            </button>
+            <button
+              class="icon-btn"
+              id="themeBtn"
+              type="button"
+              aria-pressed="false"
+              title="Toggle dark mode"
+            >
+              ☾
+            </button>
           </div>
         </div>
       </header>
@@ -41,8 +68,7 @@
             <div class="hero__rule" aria-hidden="true"></div>
             <h1 class="join__title">Join the room</h1>
             <p class="join__lead">
-              Enter a display name to start messaging. Everyone in the room sees joins,
-              leaves, and new messages live.
+              Pick a unique display name. Messages stream live over a persistent connection.
             </p>
 
             <form class="join__form" id="joinForm" novalidate>
@@ -67,32 +93,51 @@
         <section class="chat" id="chatPanel" hidden>
           <div class="chat__shell">
             <div class="chat__head">
-              <div>
+              <div class="chat__head-main">
                 <p class="eyebrow">Live room</p>
                 <h2 class="chat__title">Group chat</h2>
+                <p class="chat__presence" id="presenceLabel">Nobody else online</p>
               </div>
-              <button class="btn btn--outline" id="leaveBtn" type="button">Leave</button>
+              <div class="chat__head-actions">
+                <span class="site-header__user site-header__user--mobile" id="userBadgeMobile" hidden></span>
+                <button class="btn btn--outline btn--small" id="leaveBtn" type="button">Leave</button>
+              </div>
             </div>
 
-            <div
-              class="chat__messages"
-              id="messageContainer"
-              role="log"
-              aria-live="polite"
-              aria-relevant="additions"
-            ></div>
+            <div class="chat__stream-wrap">
+              <div
+                class="chat__messages"
+                id="messageContainer"
+                role="log"
+                aria-live="polite"
+                aria-relevant="additions"
+              >
+                <div class="empty" id="emptyState">
+                  <p>No messages yet — say hi 👋</p>
+                </div>
+              </div>
+              <button class="jump" id="jumpBtn" type="button" hidden>↓ New messages</button>
+            </div>
 
             <form class="composer" id="send-container" autocomplete="off">
               <label class="sr-only" for="messageInp">Message</label>
-              <input
-                id="messageInp"
-                name="messageInp"
-                type="text"
-                maxlength="2000"
-                placeholder="Write a message…"
-                disabled
-              />
-              <button class="btn btn--primary" id="sendBtn" type="submit" disabled>Send</button>
+              <div class="composer__box">
+                <textarea
+                  id="messageInp"
+                  name="messageInp"
+                  rows="1"
+                  maxlength="2000"
+                  placeholder="Write a message…"
+                  disabled
+                ></textarea>
+                <div class="composer__meta">
+                  <span id="charCount">0 / 2000</span>
+                </div>
+              </div>
+              <button class="btn btn--primary composer__send" id="sendBtn" type="submit" disabled aria-label="Send">
+                <span class="composer__send-label">Send</span>
+                <span class="composer__send-icon" aria-hidden="true">➤</span>
+              </button>
             </form>
           </div>
         </section>

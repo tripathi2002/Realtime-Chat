@@ -7,6 +7,7 @@ RewriteEngine On
   Header always set X-Content-Type-Options "nosniff"
   Header always set X-Frame-Options "SAMEORIGIN"
   Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set X-Robots-Tag "noindex, nofollow"
 </IfModule>
 
 RewriteCond %{REQUEST_FILENAME} -f [OR]

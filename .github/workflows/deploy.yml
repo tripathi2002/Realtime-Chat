@@ -3,6 +3,7 @@ name: Deploy SIT UI to Hostinger
 on:
   push:
     branches: [ui/v2]
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -10,11 +11,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Inject API base URL
+        env:
+          CHAT_API_BASE_URL: ${{ vars.CHAT_API_BASE_URL }}
+          CHAT_API_BASE_URL_SECRET: ${{ secrets.CHAT_API_BASE_URL }}
+        run: |
+          API_URL="${CHAT_API_BASE_URL:-$CHAT_API_BASE_URL_SECRET}"
+          API_URL="${API_URL:-https://vibhu.pro/sit/realtime-chat/api/v2}"
+          printf "window.CHAT_API_BASE_URL = '%s';\n" "$API_URL" > js/config.js
+          echo "Injected API URL length=${#API_URL}"
+
+      - name: Verify FTP_HOST secret
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+        run: |
+          if [ -z "$FTP_HOST" ]; then
+            echo "FTP_HOST secret is empty"
+            exit 1
+          fi
+          TRIMMED="$(printf '%s' "$FTP_HOST" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          echo "FTP_HOST length=${#FTP_HOST} trimmed_length=${#TRIMMED}"
+          if [ "$FTP_HOST" != "$TRIMMED" ]; then
+            echo "FTP_HOST has leading/trailing whitespace or newlines"
+            exit 1
+          fi
+          getent hosts "$FTP_HOST" || {
+            echo "DNS lookup failed for FTP_HOST"
+            exit 1
+          }
+
       - uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.FTP_HOST }}
           username: ${{ secrets.FTP_USER }}
           password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftp
           local-dir: ./
           server-dir: sit/realtime-chat/ui/v2/
           exclude: |
