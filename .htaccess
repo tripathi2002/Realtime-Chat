@@ -3,6 +3,8 @@
 Options -Indexes
 
 <IfModule mod_headers.c>
+    Header unset X-Powered-By
+    Header always unset X-Powered-By
     Header set X-Content-Type-Options "nosniff"
 </IfModule>
 
@@ -11,17 +13,5 @@ Options -Indexes
 
     RewriteCond %{REQUEST_FILENAME} !-f
     RewriteCond %{REQUEST_FILENAME} !-d
-    RewriteRule ^join/?$ join.php [L,QSA]
-
-    RewriteCond %{REQUEST_FILENAME} !-f
-    RewriteCond %{REQUEST_FILENAME} !-d
-    RewriteRule ^message/?$ message.php [L,QSA]
-
-    RewriteCond %{REQUEST_FILENAME} !-f
-    RewriteCond %{REQUEST_FILENAME} !-d
-    RewriteRule ^leave/?$ leave.php [L,QSA]
-
-    RewriteCond %{REQUEST_FILENAME} !-f
-    RewriteCond %{REQUEST_FILENAME} !-d
-    RewriteRule ^poll/?$ poll.php [L,QSA]
+    RewriteRule ^(join|resume|message|leave|poll|stream|presence)/?$ $1.php [L,QSA]
 </IfModule>

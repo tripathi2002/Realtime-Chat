@@ -3,6 +3,7 @@ name: Deploy PHP API to Hostinger
 on:
   push:
     branches: [php/api/v2, api/v2/php]
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -10,11 +11,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify FTP_HOST secret
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+        run: |
+          if [ -z "$FTP_HOST" ]; then
+            echo "FTP_HOST secret is empty"
+            exit 1
+          fi
+          TRIMMED="$(printf '%s' "$FTP_HOST" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          echo "FTP_HOST length=${#FTP_HOST} trimmed_length=${#TRIMMED}"
+          if [ "$FTP_HOST" != "$TRIMMED" ]; then
+            echo "FTP_HOST has leading/trailing whitespace or newlines"
+            exit 1
+          fi
+          getent hosts "$FTP_HOST" || {
+            echo "DNS lookup failed for FTP_HOST"
+            exit 1
+          }
+
       - uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.FTP_HOST }}
           username: ${{ secrets.FTP_USER }}
           password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftp
           local-dir: ./
           server-dir: sit/realtime-chat/api/v2/
           exclude: |

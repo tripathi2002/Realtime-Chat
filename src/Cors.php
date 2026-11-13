@@ -16,7 +16,9 @@ final class Cors
 
         header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
         header('Access-Control-Allow-Headers: Content-Type, Accept, X-Chat-Token');
+        header('Access-Control-Expose-Headers: X-Chat-Since');
         header('Access-Control-Max-Age: 86400');
+        header_remove('X-Powered-By');
 
         if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'OPTIONS') {
             http_response_code(204);

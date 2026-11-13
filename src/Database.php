@@ -46,10 +46,13 @@ final class Database
                 id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                 token CHAR(64) NOT NULL,
                 name VARCHAR(100) NOT NULL,
+                name_key VARCHAR(100) NOT NULL,
                 last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_message_at TIMESTAMP NULL DEFAULT NULL,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (id),
                 UNIQUE KEY uq_chat_users_token (token),
+                UNIQUE KEY uq_chat_users_name_key (name_key),
                 KEY idx_chat_users_last_seen (last_seen_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
         );
@@ -57,13 +60,48 @@ final class Database
         $pdo->exec(
             'CREATE TABLE IF NOT EXISTS chat_events (
                 id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                type ENUM("join", "message", "leave") NOT NULL,
+                type ENUM("join", "message", "leave", "typing") NOT NULL,
                 user_name VARCHAR(100) NOT NULL,
                 message TEXT NULL,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (id),
-                KEY idx_chat_events_id (id)
+                KEY idx_chat_events_id (id),
+                KEY idx_chat_events_type_id (type, id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
         );
+
+        self::ensureColumn($pdo, 'chat_users', 'name_key', 'VARCHAR(100) NOT NULL DEFAULT \'\' AFTER name');
+        self::ensureColumn($pdo, 'chat_users', 'last_message_at', 'TIMESTAMP NULL DEFAULT NULL AFTER last_seen_at');
+        $pdo->exec("UPDATE chat_users SET name_key = LOWER(name) WHERE name_key = '' OR name_key IS NULL");
+        self::ensureIndex($pdo, 'chat_users', 'uq_chat_users_name_key', 'UNIQUE KEY uq_chat_users_name_key (name_key)');
+    }
+
+    private static function ensureColumn(PDO $pdo, string $table, string $column, string $definition): void
+    {
+        $stmt = $pdo->prepare(
+            'SELECT COUNT(*) FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table AND COLUMN_NAME = :column'
+        );
+        $stmt->execute([':table' => $table, ':column' => $column]);
+        if ((int) $stmt->fetchColumn() === 0) {
+            $pdo->exec("ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
+        }
+    }
+
+    private static function ensureIndex(PDO $pdo, string $table, string $index, string $definition): void
+    {
+        $stmt = $pdo->prepare(
+            'SELECT COUNT(*) FROM information_schema.STATISTICS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table AND INDEX_NAME = :index'
+        );
+        $stmt->execute([':table' => $table, ':index' => $index]);
+        if ((int) $stmt->fetchColumn() === 0) {
+            try {
+                $pdo->exec("ALTER TABLE {$table} ADD {$definition}");
+            } catch (Throwable $e) {
+                // Ignore duplicate-name collisions during rolling deploys.
+                error_log('[chat-api] index ensure: ' . $e->getMessage());
+            }
+        }
     }
 }
