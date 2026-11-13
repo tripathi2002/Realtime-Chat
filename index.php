@@ -1,0 +1,17 @@
+<?php
+
+declare(strict_types=1);
+
+/** @var ChatService $chat */
+[$chat] = require __DIR__ . '/bootstrap.php';
+
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+
+if ($method !== 'GET') {
+    Response::json([
+        'ok' => false,
+        'message' => 'Method not allowed. Use GET.',
+    ], 405);
+}
+
+Response::json($chat->health(), 200);

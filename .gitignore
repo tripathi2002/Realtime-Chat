@@ -1,3 +1,12 @@
+# Local / Hostinger secrets
+config.php
+deploy/
 .env
-node_modules
+.env.*
+
+# OS / editor
 .DS_Store
+Thumbs.db
+
+# Logs
+*.log

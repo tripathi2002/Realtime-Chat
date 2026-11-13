@@ -1,0 +1,28 @@
+name: Deploy PHP API to Hostinger
+
+on:
+  push:
+    branches: [php/api/v2, api/v2/php]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USER }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          local-dir: ./
+          server-dir: sit/realtime-chat/api/v2/
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/.github/**
+            **/config.php
+            **/node_modules/**
+            **/deploy/**
+            README.md
+            LICENSE
