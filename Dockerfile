@@ -1,9 +1,7 @@
-FROM node:18-alpine
+FROM nginx:alpine
 
-WORKDIR /app
+COPY . /usr/share/nginx/html
 
-COPY . . 
+EXPOSE 80
 
-RUN npm install 
-
-CMD ["node", "index.js"]
+CMD ["nginx", "-g", "daemon off;"]
