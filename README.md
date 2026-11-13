@@ -1,29 +1,25 @@
-# Realtime Chat
+# Realtime Chat — Backend
 
-A simple group chat app built with Node.js, Express and Socket.IO. Users enter a name, join a shared room and exchange messages instantly; everyone is notified when someone joins or leaves.
+Node.js Express + Socket.IO server for the realtime group chat app. Handles connections, message broadcast, and join/leave events.
 
 ## Features
 
 - Real-time messaging over WebSockets (Socket.IO)
 - Join / leave notifications broadcast to other users
-- Notification sound on incoming messages (`public/noti.wav`)
-- Static vanilla JS frontend served by the same Express server
+- CORS enabled for a separately hosted frontend
 - Dockerfile for containerized runs
 
 ## Tech stack
 
-Node.js · Express · Socket.IO · morgan · dotenv · HTML/CSS/JavaScript · Docker
+Node.js · Express · Socket.IO · morgan · dotenv · Docker
 
 ## Project structure
 
 ```
-index.js              # Express + Socket.IO server
-frontend/index.html   # chat UI
-frontend/js/client.js # Socket.IO client
-frontend/css/style.css
-public/noti.wav       # notification sound
+index.js          # Express + Socket.IO server
 Dockerfile
 .env.example
+package.json
 ```
 
 ## Getting started
@@ -34,18 +30,16 @@ cp .env.example .env
 npm run dev            # nodemon index.js, default port 8000
 ```
 
-> The client in `frontend/js/client.js` points at a hosted Socket.IO URL. For local development, switch it to the commented `http://localhost:8000` line.
-
 With Docker:
 
 ```bash
-docker build -t realtime-chat .
-docker run -p 8000:8000 realtime-chat
+docker build -t realtime-chat-backend .
+docker run -p 8000:8000 realtime-chat-backend
 ```
 
 ## Environment variables
 
-`PORT`, `SOCKET_SERVER_URL`
+`PORT` — HTTP/Socket.IO listen port (default `8000`)
 
 ## Socket events
 
@@ -56,9 +50,6 @@ docker run -p 8000:8000 realtime-chat
 | `user-joined` | server → clients | name |
 | `receive` | server → clients | `{ message, name }` |
 | `leave` | server → clients | name |
-## Screenshots
-
-_Screenshots coming soon._
 
 ## License
 
