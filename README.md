@@ -1,14 +1,14 @@
 # Realtime Chat — Frontend
 
-Static HTML/CSS/JS chat UI. Talks to the PHP poll API (no Socket.IO).
+Static HTML/CSS/JS chat UI aligned with the vibhu.pro portfolio design system (accent, typography, forms). Talks to the PHP poll API.
 
 ## Project structure
 
 ```
 index.html
 js/config.js      # API base URL
-js/client.js      # join / send / poll loop
-css/style.css
+js/client.js      # join screen / send / poll loop
+css/style.css     # portfolio design tokens
 images/vat.png
 public/noti.wav
 .htaccess

@@ -3,20 +3,107 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>v-chat</title>
+    <meta name="theme-color" content="#009bdf" />
+    <meta
+      name="description"
+      content="v-chat — a realtime group chat by Vibhu Tripathi."
+    />
+    <title>v-chat · Vibhu</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Playfair+Display:wght@700;800&family=Plus+Jakarta+Sans:wght@700&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="css/style.css" />
   </head>
   <body>
-    <nav>
-      <img src="images/vat.png" class="logo" alt="" />
-    </nav>
-    <div class="container"></div>
+    <div class="app">
+      <header class="site-header">
+        <div class="site-header__inner">
+          <a class="site-header__brand" href="./" aria-label="v-chat home">
+            <img src="images/vat.png" alt="v-chat" width="120" height="40" />
+          </a>
+          <div class="site-header__meta">
+            <span class="status" id="connectionStatus" data-state="idle">
+              <span class="status__dot" aria-hidden="true"></span>
+              <span class="status__label">Offline</span>
+            </span>
+            <span class="site-header__user" id="userBadge" hidden></span>
+          </div>
+        </div>
+      </header>
 
-    <div class="send">
-      <form action="#" id="send-container">
-        <input type="text" name="messageInp" id="messageInp" />
-        <button class="btn" type="submit">Submit</button>
-      </form>
+      <main class="site-main">
+        <section class="join" id="joinPanel">
+          <div class="join__card">
+            <p class="eyebrow">Realtime chat</p>
+            <div class="hero__rule" aria-hidden="true"></div>
+            <h1 class="join__title">Join the room</h1>
+            <p class="join__lead">
+              Enter a display name to start messaging. Everyone in the room sees joins,
+              leaves, and new messages live.
+            </p>
+
+            <form class="join__form" id="joinForm" novalidate>
+              <div class="field">
+                <label for="nameInput">Display name <span aria-hidden="true">*</span></label>
+                <input
+                  id="nameInput"
+                  name="name"
+                  type="text"
+                  maxlength="100"
+                  autocomplete="nickname"
+                  placeholder="e.g. Vibhu"
+                  required
+                />
+              </div>
+              <p class="banner banner--error" id="joinError" hidden role="alert"></p>
+              <button class="btn btn--primary" id="joinBtn" type="submit">Join chat</button>
+            </form>
+          </div>
+        </section>
+
+        <section class="chat" id="chatPanel" hidden>
+          <div class="chat__shell">
+            <div class="chat__head">
+              <div>
+                <p class="eyebrow">Live room</p>
+                <h2 class="chat__title">Group chat</h2>
+              </div>
+              <button class="btn btn--outline" id="leaveBtn" type="button">Leave</button>
+            </div>
+
+            <div
+              class="chat__messages"
+              id="messageContainer"
+              role="log"
+              aria-live="polite"
+              aria-relevant="additions"
+            ></div>
+
+            <form class="composer" id="send-container" autocomplete="off">
+              <label class="sr-only" for="messageInp">Message</label>
+              <input
+                id="messageInp"
+                name="messageInp"
+                type="text"
+                maxlength="2000"
+                placeholder="Write a message…"
+                disabled
+              />
+              <button class="btn btn--primary" id="sendBtn" type="submit" disabled>Send</button>
+            </form>
+          </div>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <p>
+          Built by
+          <a href="https://vibhu.pro" rel="noopener noreferrer" target="_blank">Vibhu Tripathi</a>
+        </p>
+      </footer>
     </div>
 
     <script src="js/config.js"></script>
