@@ -427,7 +427,8 @@
       return;
     }
     reconnectAttempt += 1;
-    const delay = Math.min(1000 * 2 ** Math.min(reconnectAttempt, 5), 20000);
+    // Back off harder so reconnect storms do not exhaust Hostinger DB connection quotas.
+    const delay = Math.min(2000 * 2 ** Math.min(reconnectAttempt, 5), 30000);
     setStatus('reconnecting', 'Reconnecting');
     showReconnect(true, `Reconnecting in ${Math.round(delay / 1000)}s…`);
     reconnectTimer = setTimeout(() => {
