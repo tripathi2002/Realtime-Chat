@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 final class Database
 {
+    private const SCHEMA_VERSION = 1;
+
     private static ?PDO $pdo = null;
+
+    private static bool $schemaReady = false;
 
     public static function connection(array $config): PDO
     {
@@ -23,24 +27,57 @@ final class Database
         $user = (string) ($db['user'] ?? '');
         $pass = (string) ($db['pass'] ?? '');
         $charset = (string) ($db['charset'] ?? 'utf8mb4');
+        $persistent = (bool) ($db['persistent'] ?? true);
 
         if ($name === '' || $user === '') {
             throw new RuntimeException('Database name and user are required in config.php.');
         }
 
+        // On Hostinger, PHP and MySQL share a machine — prefer localhost/socket over the
+        // remote hostname so we do not burn max_connections_per_hour on every request.
+        if (self::isRemoteHostingerHost($host)) {
+            $host = 'localhost';
+        }
+
         $dsn = sprintf('mysql:host=%s;port=%s;dbname=%s;charset=%s', $host, $port, $name, $charset);
 
-        self::$pdo = new PDO($dsn, $user, $pass, [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES => false,
-        ]);
+        try {
+            self::$pdo = new PDO($dsn, $user, $pass, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                PDO::ATTR_EMULATE_PREPARES => false,
+                // Reuse connections across PHP-FPM workers to stay under Hostinger hourly caps.
+                PDO::ATTR_PERSISTENT => $persistent,
+            ]);
+        } catch (PDOException $e) {
+            // Persistent handles can go stale after MySQL restarts; retry once cleanly.
+            if ($persistent) {
+                self::$pdo = new PDO($dsn, $user, $pass, [
+                    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                    PDO::ATTR_EMULATE_PREPARES => false,
+                    PDO::ATTR_PERSISTENT => false,
+                ]);
+            } else {
+                throw $e;
+            }
+        }
 
         return self::$pdo;
     }
 
     public static function ensureChatTables(PDO $pdo): void
     {
+        if (self::$schemaReady) {
+            return;
+        }
+
+        $marker = sys_get_temp_dir() . '/realtime_chat_schema_v' . self::SCHEMA_VERSION . '.ready';
+        if (is_file($marker) && (time() - (int) filemtime($marker)) < 86400) {
+            self::$schemaReady = true;
+            return;
+        }
+
         $pdo->exec(
             'CREATE TABLE IF NOT EXISTS chat_users (
                 id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -74,6 +111,15 @@ final class Database
         self::ensureColumn($pdo, 'chat_users', 'last_message_at', 'TIMESTAMP NULL DEFAULT NULL AFTER last_seen_at');
         $pdo->exec("UPDATE chat_users SET name_key = LOWER(name) WHERE name_key = '' OR name_key IS NULL");
         self::ensureIndex($pdo, 'chat_users', 'uq_chat_users_name_key', 'UNIQUE KEY uq_chat_users_name_key (name_key)');
+
+        @touch($marker);
+        self::$schemaReady = true;
+    }
+
+    private static function isRemoteHostingerHost(string $host): bool
+    {
+        return (bool) preg_match('/\.hstgr\.io$/i', $host)
+            || (bool) preg_match('/\.hostinger\./i', $host);
     }
 
     private static function ensureColumn(PDO $pdo, string $table, string $column, string $definition): void

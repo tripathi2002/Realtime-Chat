@@ -8,8 +8,16 @@ final class ChatService
     private const HISTORY_LIMIT = 80;
     private const RATE_LIMIT_MS = 500;
     private const RATE_LIMIT_PER_MINUTE = 30;
-    private const STREAM_SECONDS = 25;
-    private const STREAM_SLEEP_US = 400000;
+    // Longer streams = fewer reconnects = fewer MySQL connects under Hostinger hourly caps.
+    private const STREAM_SECONDS = 55;
+    private const STREAM_SLEEP_US = 1000000;
+    private const EXPIRE_EVERY_SECONDS = 30;
+    private const TOUCH_EVERY_SECONDS = 15;
+    private const PRESENCE_EVERY_SECONDS = 10;
+
+    private int $lastExpireAt = 0;
+    private int $lastTouchAt = 0;
+    private int $lastPresenceAt = 0;
 
     public function __construct(private readonly array $config)
     {
@@ -182,19 +190,20 @@ final class ChatService
             do {
                 $result = $this->eventsSince($pdo, $since);
                 if ($result['events'] !== [] || !$wait) {
-                    $result['online'] = $this->onlineNames($pdo);
+                    $result['online'] = $this->onlineNamesThrottled($pdo, true);
 
                     return $result;
                 }
                 usleep(self::STREAM_SLEEP_US);
-                $this->touchUser($pdo, (int) $user['id']);
+                $this->touchUserThrottled($pdo, (int) $user['id']);
+                $this->expireStaleUsersThrottled($pdo);
             } while (microtime(true) < $deadline);
 
             return [
                 'ok' => true,
                 'events' => [],
                 'since' => $since > 0 ? $since : $this->latestEventId($pdo),
-                'online' => $this->onlineNames($pdo),
+                'online' => $this->onlineNamesThrottled($pdo, true),
             ];
         } catch (InvalidArgumentException $e) {
             return ['ok' => false, 'message' => $e->getMessage()];
@@ -239,7 +248,7 @@ final class ChatService
         $this->sse('ready', [
             'ok' => true,
             'since' => $cursor,
-            'online' => $this->onlineNames($pdo),
+            'online' => $this->onlineNamesThrottled($pdo, true),
         ]);
 
         while (time() < $deadline) {
@@ -248,23 +257,27 @@ final class ChatService
             }
 
             try {
-                $this->expireStaleUsers($pdo);
-                $this->touchUser($pdo, (int) $user['id']);
+                $this->expireStaleUsersThrottled($pdo);
+                $this->touchUserThrottled($pdo, (int) $user['id']);
                 $batch = $this->eventsSince($pdo, $cursor);
                 if ($batch['events'] !== []) {
                     $this->sse('events', [
                         'ok' => true,
                         'events' => $batch['events'],
                         'since' => $batch['since'],
-                        'online' => $this->onlineNames($pdo),
+                        'online' => $this->onlineNamesThrottled($pdo, true),
                     ]);
                     $cursor = (int) $batch['since'];
                 } else {
-                    $this->sse('ping', [
+                    $payload = [
                         'ok' => true,
                         'since' => $cursor,
-                        'online' => $this->onlineNames($pdo),
-                    ]);
+                    ];
+                    $online = $this->onlineNamesThrottled($pdo, false);
+                    if ($online !== null) {
+                        $payload['online'] = $online;
+                    }
+                    $this->sse('ping', $payload);
                 }
             } catch (Throwable $e) {
                 error_log('[chat-api] stream loop: ' . $e->getMessage());
@@ -340,6 +353,16 @@ final class ChatService
     {
         $stmt = $pdo->prepare('UPDATE chat_users SET last_seen_at = NOW() WHERE id = :id');
         $stmt->execute([':id' => $userId]);
+        $this->lastTouchAt = time();
+    }
+
+    private function touchUserThrottled(PDO $pdo, int $userId): void
+    {
+        if ((time() - $this->lastTouchAt) < self::TOUCH_EVERY_SECONDS) {
+            return;
+        }
+
+        $this->touchUser($pdo, $userId);
     }
 
     private function allowMessage(PDO $pdo, int $userId): bool
@@ -389,6 +412,17 @@ final class ChatService
         foreach ($stale as $user) {
             $this->removeUser($pdo, (int) $user['id'], (string) $user['name']);
         }
+
+        $this->lastExpireAt = time();
+    }
+
+    private function expireStaleUsersThrottled(PDO $pdo): void
+    {
+        if ((time() - $this->lastExpireAt) < self::EXPIRE_EVERY_SECONDS) {
+            return;
+        }
+
+        $this->expireStaleUsers($pdo);
     }
 
     private function removeUser(PDO $pdo, int $userId, string $name): void
@@ -486,7 +520,21 @@ final class ChatService
             $names[] = (string) $row['name'];
         }
 
+        $this->lastPresenceAt = time();
+
         return $names;
+    }
+
+    /**
+     * @return list<string>|null
+     */
+    private function onlineNamesThrottled(PDO $pdo, bool $force): ?array
+    {
+        if (!$force && (time() - $this->lastPresenceAt) < self::PRESENCE_EVERY_SECONDS) {
+            return null;
+        }
+
+        return $this->onlineNames($pdo);
     }
 
     private function latestEventId(PDO $pdo): int

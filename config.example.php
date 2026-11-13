@@ -8,12 +8,16 @@
  */
 return [
     'db' => [
+        // Hostinger same-server PHP: ALWAYS use "localhost" (not srvXXXX.hstgr.io).
+        // The remote hostname burns max_connections_per_hour very quickly.
         'host' => 'localhost',
         'port' => '3306',
         'name' => 'YOUR_DB_NAME',
         'user' => 'YOUR_DB_USER',
         'pass' => 'YOUR_DB_PASSWORD',
         'charset' => 'utf8mb4',
+        // Keep true on shared hosting so PHP-FPM reuses MySQL handles.
+        'persistent' => true,
     ],
     'allowed_origins' => [
         'http://localhost:5500',
