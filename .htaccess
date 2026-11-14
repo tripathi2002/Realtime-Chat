@@ -13,5 +13,5 @@ Options -Indexes
 
     RewriteCond %{REQUEST_FILENAME} !-f
     RewriteCond %{REQUEST_FILENAME} !-d
-    RewriteRule ^(signup|login|logout|me|rooms|join|resume|message|leave|poll|stream|presence)/?$ $1.php [L,QSA]
+    RewriteRule ^(signup|login|logout|me|rooms|join|resume|message|leave|poll|stream|presence|flush)/?$ $1.php [L,QSA]
 </IfModule>

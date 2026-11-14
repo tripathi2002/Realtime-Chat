@@ -1,46 +1,55 @@
 # Realtime Chat — PHP API
 
-PHP + MySQL chat backend for Hostinger.
+Chat hot path (join presence, messages, poll/stream) uses **local files** to avoid Hostinger MySQL connection-hour limits. An **hourly flush** moves pending events into MySQL and cleans the files.
 
-## Features
+## Storage model
 
-- Signup / login with unique public user IDs (`u_########`)
-- Create rooms and join by code / shareable `?room=CODE` link
-- SSE live updates (`/stream`) + long-poll fallback
-- Room-scoped history, presence, rate limits
-
-## Auth
-
-| Method | Path | Notes |
+| Data | Where | When DB is used |
 |---|---|---|
-| `POST` | `/signup` | `{ email, password, displayName }` |
-| `POST` | `/login` | `{ email, password }` |
-| `POST` | `/logout` | header `X-Auth-Token` |
-| `GET` | `/me` | header `X-Auth-Token` |
+| Auth / rooms | MySQL | signup, login, create/list room, join room lookup |
+| Presence + live events | `storage/rooms/{id}/` | never on poll/stream/message |
+| Archived events | MySQL | hourly flush; join/resume history top-up |
 
-## Rooms
+```
+storage/
+  rooms/{roomId}/events.jsonl
+  rooms/{roomId}/presence.json
+  sessions/{token}.json
+  flush/
+```
 
-| Method | Path | Notes |
-|---|---|---|
-| `POST` | `/rooms` | create `{ name }` |
-| `GET` | `/rooms` | list my rooms |
-| `GET` | `/rooms?code=ABCD1234` | room details |
+## Hourly flush
 
-## Chat (room presence)
+Protect with `flush.key` in `config.php`.
 
-| Method | Path | Notes |
-|---|---|---|
-| `POST` | `/join` | `{ roomCode }` + `X-Auth-Token` → chat token |
-| `GET` | `/resume` | restore chat session (`X-Chat-Token`) |
-| `POST` | `/message` | `{ message }` |
-| `POST` | `/leave` | leave room presence |
-| `GET` | `/stream?since=` | SSE |
-| `GET` | `/poll?since=&wait=1` | long-poll |
+Hostinger cron (every hour):
 
-Headers:
-- `X-Auth-Token` — account session
-- `X-Chat-Token` — in-room presence session
+```bash
+0 * * * * curl -fsS "https://vibhu.pro/sit/realtime-chat/api/v2/flush?key=YOUR_FLUSH_KEY"
+```
 
-## Deploy
+Force run (ops):
 
-Push `php/api/v2` → `sit/realtime-chat/api/v2/`. Keep `config.php` on the server.
+```bash
+curl "https://vibhu.pro/sit/realtime-chat/api/v2/flush?key=YOUR_FLUSH_KEY&force=1"
+```
+
+### Flush behaviour
+
+| Scenario | Result |
+|---|---|
+| File has data | Insert into MySQL → clean file lines |
+| File empty | `{ skipped: true }` |
+| DB write fails | Files **kept** (no data loss) |
+| Flush already running | `409 lock_busy` |
+| Bad flush key | `401` |
+
+## Auth / rooms / chat endpoints
+
+Same as before (`X-Auth-Token`, `X-Chat-Token`). See previous docs for signup/login/rooms/join/stream.
+
+## Local scenario tests
+
+```bash
+php bin/test-file-store.php
+```

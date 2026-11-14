@@ -4,9 +4,14 @@ deploy/
 .env
 .env.*
 
+# Runtime file buffer (presence + events before hourly DB flush)
+storage/*
+!storage/.gitkeep
+
 # OS / editor
 .DS_Store
 Thumbs.db
 
 # Logs
 *.log
+

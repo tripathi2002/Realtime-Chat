@@ -22,6 +22,7 @@ final class ChatService
         private readonly array $config,
         private readonly AuthService $auth,
         private readonly RoomService $rooms,
+        private readonly FileStore $store,
     ) {
     }
 
@@ -30,9 +31,10 @@ final class ChatService
         return [
             'ok' => true,
             'service' => 'realtime-chat-api',
-            'storage' => 'mysql',
+            'storage' => 'file+hourly-db-flush',
             'transport' => 'sse+long-poll',
             'message' => 'Chat API is online.',
+            'pendingFlush' => $this->store->hasUnflushedData(),
         ];
     }
 
@@ -48,77 +50,52 @@ final class ChatService
 
         try {
             $account = $this->auth->requireAccount($authToken);
-            $pdo = $this->pdo();
+            // Rare DB hit: validate room exists.
+            $pdo = Database::connection($this->config);
+            Database::ensureChatTables($pdo);
             $room = $this->rooms->requireRoom($pdo, $roomCode);
             if ($room === null) {
                 return ['ok' => false, 'message' => 'Room not found.'];
             }
 
-            $this->expireStaleUsers($pdo);
+            $this->expireStaleUsers();
 
             $roomId = (int) $room['id'];
-            $accountId = (int) $account['id'];
-            $name = (string) $account['display_name'];
-            $nameKey = mb_strtolower($name);
-
-            // One presence row per account per room — refresh token if already inside.
-            $existing = $pdo->prepare(
-                'SELECT id FROM chat_users WHERE room_id = :room_id AND account_id = :account_id LIMIT 1'
-            );
-            $existing->execute([':room_id' => $roomId, ':account_id' => $accountId]);
-            $row = $existing->fetch();
-
             $token = bin2hex(random_bytes(32));
-            if (is_array($row)) {
-                $upd = $pdo->prepare(
-                    'UPDATE chat_users
-                     SET token = :token, name = :name, name_key = :name_key, last_seen_at = NOW()
-                     WHERE id = :id'
-                );
-                $upd->execute([
-                    ':token' => $token,
-                    ':name' => $name,
-                    ':name_key' => $nameKey,
-                    ':id' => (int) $row['id'],
+            $name = (string) $account['display_name'];
+            $publicId = (string) $account['public_id'];
+
+            $presence = $this->store->upsertPresence($roomId, [
+                'token' => $token,
+                'accountId' => (int) $account['id'],
+                'name' => $name,
+                'publicId' => $publicId,
+            ]);
+
+            if ($presence['isNew']) {
+                $this->store->appendEvent($roomId, [
+                    'type' => 'join',
+                    'name' => $name,
+                    'message' => null,
                 ]);
-            } else {
-                $ins = $pdo->prepare(
-                    'INSERT INTO chat_users (token, room_id, account_id, name, name_key, last_seen_at)
-                     VALUES (:token, :room_id, :account_id, :name, :name_key, NOW())'
-                );
-                $ins->execute([
-                    ':token' => $token,
-                    ':room_id' => $roomId,
-                    ':account_id' => $accountId,
-                    ':name' => $name,
-                    ':name_key' => $nameKey,
-                ]);
-                $this->insertEvent($pdo, $roomId, 'join', $name, null);
             }
 
             return [
                 'ok' => true,
                 'token' => $token,
                 'name' => $name,
-                'publicId' => (string) $account['public_id'],
+                'publicId' => $publicId,
                 'room' => [
                     'code' => (string) $room['code'],
                     'name' => (string) $room['name'],
                     'path' => '?room=' . rawurlencode((string) $room['code']),
                 ],
-                'since' => $this->latestEventId($pdo, $roomId),
-                'history' => $this->history($pdo, $roomId),
-                'online' => $this->onlineNames($pdo, $roomId),
+                'since' => $this->store->latestEventId($roomId),
+                'history' => $this->history($roomId, $pdo),
+                'online' => $this->store->onlineNames($roomId),
             ];
         } catch (InvalidArgumentException $e) {
             return ['ok' => false, 'message' => $e->getMessage()];
-        } catch (PDOException $e) {
-            if ((int) ($e->errorInfo[1] ?? 0) === 1062) {
-                return ['ok' => false, 'message' => 'You are already joining this room. Try again.'];
-            }
-            error_log('[chat-api] join: ' . $e->getMessage());
-
-            return ['ok' => false, 'message' => 'Unable to join right now. Please try again later.'];
         } catch (Throwable $e) {
             error_log('[chat-api] join: ' . $e->getMessage());
 
@@ -132,28 +109,39 @@ final class ChatService
     public function resume(string $token): array
     {
         try {
-            $pdo = $this->pdo();
-            $user = $this->requireUser($pdo, $token);
-            $roomId = (int) $user['room_id'];
-            $this->touchUser($pdo, (int) $user['id']);
-            $this->expireStaleUsers($pdo);
+            $user = $this->requireUser($token);
+            $roomId = (int) $user['roomId'];
+            $this->store->touchPresence($token);
+            $this->expireStaleUsers();
 
-            $roomStmt = $pdo->prepare('SELECT code, name FROM rooms WHERE id = :id LIMIT 1');
-            $roomStmt->execute([':id' => $roomId]);
-            $room = $roomStmt->fetch();
+            $room = null;
+            try {
+                $pdo = Database::connection($this->config);
+                Database::ensureChatTables($pdo);
+                $roomStmt = $pdo->prepare('SELECT code, name FROM rooms WHERE id = :id LIMIT 1');
+                $roomStmt->execute([':id' => $roomId]);
+                $row = $roomStmt->fetch();
+                if (is_array($row)) {
+                    $room = [
+                        'code' => (string) $row['code'],
+                        'name' => (string) $row['name'],
+                        'path' => '?room=' . rawurlencode((string) $row['code']),
+                    ];
+                }
+                $history = $this->history($roomId, $pdo);
+            } catch (Throwable $e) {
+                error_log('[chat-api] resume room meta: ' . $e->getMessage());
+                $history = $this->store->history($roomId, self::HISTORY_LIMIT);
+            }
 
             return [
                 'ok' => true,
                 'name' => (string) $user['name'],
-                'publicId' => (string) ($user['public_id'] ?? ''),
-                'room' => is_array($room) ? [
-                    'code' => (string) $room['code'],
-                    'name' => (string) $room['name'],
-                    'path' => '?room=' . rawurlencode((string) $room['code']),
-                ] : null,
-                'since' => $this->latestEventId($pdo, $roomId),
-                'history' => $this->history($pdo, $roomId),
-                'online' => $this->onlineNames($pdo, $roomId),
+                'publicId' => (string) ($user['publicId'] ?? ''),
+                'room' => $room,
+                'since' => $this->store->latestEventId($roomId),
+                'history' => $history,
+                'online' => $this->store->onlineNames($roomId),
             ];
         } catch (InvalidArgumentException $e) {
             return ['ok' => false, 'message' => $e->getMessage()];
@@ -175,20 +163,20 @@ final class ChatService
         }
 
         try {
-            $pdo = $this->pdo();
-            $user = $this->requireUser($pdo, $token);
-            $userId = (int) $user['id'];
-            $roomId = (int) $user['room_id'];
-
-            if (!$this->allowMessage($pdo, $userId, $roomId, (string) $user['name'])) {
+            $user = $this->requireUser($token);
+            if (!$this->allowMessage($user)) {
                 return ['ok' => false, 'message' => 'You are sending messages too quickly. Please wait a moment.'];
             }
 
-            $this->touchUser($pdo, $userId);
-            $id = $this->insertEvent($pdo, $roomId, 'message', (string) $user['name'], $message);
-            $this->markMessageSent($pdo, $userId);
+            $event = $this->store->appendEvent((int) $user['roomId'], [
+                'type' => 'message',
+                'name' => (string) $user['name'],
+                'message' => $message,
+            ]);
+            $this->store->markMessageSent($token);
+            $this->rememberRate($user);
 
-            return ['ok' => true, 'id' => $id];
+            return ['ok' => true, 'id' => (int) $event['id']];
         } catch (InvalidArgumentException $e) {
             return ['ok' => false, 'message' => $e->getMessage()];
         } catch (Throwable $e) {
@@ -204,13 +192,14 @@ final class ChatService
     public function leave(string $token): array
     {
         try {
-            $pdo = $this->pdo();
-            $user = $this->findUser($pdo, $token);
-            if ($user === null) {
-                return ['ok' => true];
+            $removed = $this->store->removePresence($token);
+            if ($removed !== null) {
+                $this->store->appendEvent((int) $removed['roomId'], [
+                    'type' => 'leave',
+                    'name' => (string) $removed['name'],
+                    'message' => null,
+                ]);
             }
-
-            $this->removeUser($pdo, (int) $user['id'], (int) $user['room_id'], (string) $user['name']);
 
             return ['ok' => true];
         } catch (Throwable $e) {
@@ -226,30 +215,33 @@ final class ChatService
     public function poll(string $token, int $since, bool $wait = false): array
     {
         try {
-            $pdo = $this->pdo();
-            $user = $this->requireUser($pdo, $token);
-            $roomId = (int) $user['room_id'];
-            $this->touchUser($pdo, (int) $user['id']);
-            $this->expireStaleUsers($pdo);
+            $user = $this->requireUser($token);
+            $roomId = (int) $user['roomId'];
+            $this->touchThrottled($token);
+            $this->expireStaleUsersThrottled();
 
             $deadline = microtime(true) + ($wait ? self::STREAM_SECONDS : 0);
             do {
-                $result = $this->eventsSince($pdo, $roomId, $since);
-                if ($result['events'] !== [] || !$wait) {
-                    $result['online'] = $this->onlineNamesThrottled($pdo, $roomId, true);
-
-                    return $result;
+                $events = $this->store->eventsSince($roomId, $since, 100);
+                $latest = $this->store->latestEventId($roomId);
+                if ($events !== [] || !$wait) {
+                    return [
+                        'ok' => true,
+                        'events' => $events,
+                        'since' => $latest > 0 ? max($since, $latest) : $since,
+                        'online' => $this->onlineThrottled($roomId, true),
+                    ];
                 }
                 usleep(self::STREAM_SLEEP_US);
-                $this->touchUserThrottled($pdo, (int) $user['id']);
-                $this->expireStaleUsersThrottled($pdo);
+                $this->touchThrottled($token);
+                $this->expireStaleUsersThrottled();
             } while (microtime(true) < $deadline);
 
             return [
                 'ok' => true,
                 'events' => [],
-                'since' => $since > 0 ? $since : $this->latestEventId($pdo, $roomId),
-                'online' => $this->onlineNamesThrottled($pdo, $roomId, true),
+                'since' => $since > 0 ? $since : $this->store->latestEventId($roomId),
+                'online' => $this->onlineThrottled($roomId, true),
             ];
         } catch (InvalidArgumentException $e) {
             return ['ok' => false, 'message' => $e->getMessage()];
@@ -276,10 +268,9 @@ final class ChatService
         header_remove('X-Powered-By');
 
         try {
-            $pdo = $this->pdo();
-            $user = $this->requireUser($pdo, $token);
-            $roomId = (int) $user['room_id'];
-            $this->touchUser($pdo, (int) $user['id']);
+            $user = $this->requireUser($token);
+            $roomId = (int) $user['roomId'];
+            $this->store->touchPresence($token);
         } catch (InvalidArgumentException $e) {
             $this->sse('error', ['ok' => false, 'message' => $e->getMessage()]);
             return;
@@ -295,7 +286,7 @@ final class ChatService
         $this->sse('ready', [
             'ok' => true,
             'since' => $cursor,
-            'online' => $this->onlineNamesThrottled($pdo, $roomId, true),
+            'online' => $this->onlineThrottled($roomId, true),
         ]);
 
         while (time() < $deadline) {
@@ -304,23 +295,20 @@ final class ChatService
             }
 
             try {
-                $this->expireStaleUsersThrottled($pdo);
-                $this->touchUserThrottled($pdo, (int) $user['id']);
-                $batch = $this->eventsSince($pdo, $roomId, $cursor);
-                if ($batch['events'] !== []) {
+                $this->expireStaleUsersThrottled();
+                $this->touchThrottled($token);
+                $events = $this->store->eventsSince($roomId, $cursor, 100);
+                if ($events !== []) {
+                    $cursor = max($cursor, (int) $events[array_key_last($events)]['id']);
                     $this->sse('events', [
                         'ok' => true,
-                        'events' => $batch['events'],
-                        'since' => $batch['since'],
-                        'online' => $this->onlineNamesThrottled($pdo, $roomId, true),
-                    ]);
-                    $cursor = (int) $batch['since'];
-                } else {
-                    $payload = [
-                        'ok' => true,
+                        'events' => $events,
                         'since' => $cursor,
-                    ];
-                    $online = $this->onlineNamesThrottled($pdo, $roomId, false);
+                        'online' => $this->onlineThrottled($roomId, true),
+                    ]);
+                } else {
+                    $payload = ['ok' => true, 'since' => $cursor];
+                    $online = $this->onlineThrottled($roomId, false);
                     if ($online !== null) {
                         $payload['online'] = $online;
                     }
@@ -344,12 +332,11 @@ final class ChatService
     public function presence(string $token): array
     {
         try {
-            $pdo = $this->pdo();
-            $user = $this->requireUser($pdo, $token);
-            $this->touchUser($pdo, (int) $user['id']);
-            $this->expireStaleUsers($pdo);
+            $user = $this->requireUser($token);
+            $this->store->touchPresence($token);
+            $this->expireStaleUsers();
 
-            return ['ok' => true, 'online' => $this->onlineNames($pdo, (int) $user['room_id'])];
+            return ['ok' => true, 'online' => $this->store->onlineNames((int) $user['roomId'])];
         } catch (InvalidArgumentException $e) {
             return ['ok' => false, 'message' => $e->getMessage()];
         } catch (Throwable $e) {
@@ -359,20 +346,12 @@ final class ChatService
         }
     }
 
-    private function pdo(): PDO
-    {
-        $pdo = Database::connection($this->config);
-        Database::ensureChatTables($pdo);
-
-        return $pdo;
-    }
-
     /**
-     * @return array{id: int|string, token: string, name: string, room_id: int|string, account_id?: int|string, public_id?: string}
+     * @return array{token: string, roomId: int, accountId: int, name: string, publicId: string, lastSeenAt?: string, lastMessageAt?: ?string}
      */
-    private function requireUser(PDO $pdo, string $token): array
+    private function requireUser(string $token): array
     {
-        $user = $this->findUser($pdo, $token);
+        $user = $this->store->findPresenceByToken($token);
         if ($user === null) {
             throw new InvalidArgumentException('Invalid or expired chat session. Join again.');
         }
@@ -381,224 +360,150 @@ final class ChatService
     }
 
     /**
-     * @return array{id: int|string, token: string, name: string, room_id: int|string, account_id?: int|string, public_id?: string}|null
+     * @param array{token: string, roomId: int, name: string, lastMessageAt?: ?string} $user
      */
-    private function findUser(PDO $pdo, string $token): ?array
+    private function allowMessage(array $user): bool
     {
-        if ($token === '' || !preg_match('/^[a-f0-9]{64}$/', $token)) {
-            return null;
-        }
-
-        $stmt = $pdo->prepare(
-            'SELECT cu.id, cu.token, cu.name, cu.room_id, cu.account_id, a.public_id
-             FROM chat_users cu
-             LEFT JOIN accounts a ON a.id = cu.account_id
-             WHERE cu.token = :token
-             LIMIT 1'
-        );
-        $stmt->execute([':token' => $token]);
-        $user = $stmt->fetch();
-
-        return is_array($user) ? $user : null;
-    }
-
-    private function touchUser(PDO $pdo, int $userId): void
-    {
-        $stmt = $pdo->prepare('UPDATE chat_users SET last_seen_at = NOW() WHERE id = :id');
-        $stmt->execute([':id' => $userId]);
-        $this->lastTouchAt = time();
-    }
-
-    private function touchUserThrottled(PDO $pdo, int $userId): void
-    {
-        if ((time() - $this->lastTouchAt) < self::TOUCH_EVERY_SECONDS) {
-            return;
-        }
-
-        $this->touchUser($pdo, $userId);
-    }
-
-    private function allowMessage(PDO $pdo, int $userId, int $roomId, string $name): bool
-    {
-        $stmt = $pdo->prepare('SELECT last_message_at FROM chat_users WHERE id = :id LIMIT 1');
-        $stmt->execute([':id' => $userId]);
-        $row = $stmt->fetch();
-        if (!is_array($row)) {
-            return false;
-        }
-
-        if (!empty($row['last_message_at'])) {
-            $elapsedMs = (int) round((microtime(true) - strtotime((string) $row['last_message_at'])) * 1000);
+        if (!empty($user['lastMessageAt'])) {
+            $elapsedMs = (int) round((microtime(true) - strtotime((string) $user['lastMessageAt'] . ' UTC')) * 1000);
             if ($elapsedMs >= 0 && $elapsedMs < self::RATE_LIMIT_MS) {
                 return false;
             }
         }
 
-        $countStmt = $pdo->prepare(
-            'SELECT COUNT(*) FROM chat_events
-             WHERE room_id = :room_id AND type = \'message\' AND user_name = :name
-               AND created_at >= (NOW() - INTERVAL 1 MINUTE)'
-        );
-        $countStmt->execute([':room_id' => $roomId, ':name' => $name]);
-        if ((int) $countStmt->fetchColumn() >= self::RATE_LIMIT_PER_MINUTE) {
-            return false;
-        }
-
-        return true;
+        $bucket = $this->readRateBucket($user);
+        return count($bucket) < self::RATE_LIMIT_PER_MINUTE;
     }
 
-    private function markMessageSent(PDO $pdo, int $userId): void
+    /**
+     * @param array{token: string, roomId: int} $user
+     * @return list<int>
+     */
+    private function readRateBucket(array $user): array
     {
-        $stmt = $pdo->prepare('UPDATE chat_users SET last_message_at = NOW(), last_seen_at = NOW() WHERE id = :id');
-        $stmt->execute([':id' => $userId]);
+        $path = $this->ratePath($user);
+        if (!is_file($path)) {
+            return [];
+        }
+        $decoded = json_decode((string) file_get_contents($path), true);
+        if (!is_array($decoded)) {
+            return [];
+        }
+        $now = time();
+
+        return array_values(array_filter($decoded, static fn ($ts) => is_int($ts) && $ts >= ($now - 60)));
     }
 
-    private function expireStaleUsers(PDO $pdo): void
+    /**
+     * @param array{token: string, roomId: int} $user
+     */
+    private function rememberRate(array $user): void
     {
-        $stmt = $pdo->prepare(
-            'SELECT id, room_id, name FROM chat_users
-             WHERE last_seen_at < (NOW() - INTERVAL ' . self::USER_TTL_SECONDS . ' SECOND)'
-        );
-        $stmt->execute();
-        $stale = $stmt->fetchAll();
-
-        foreach ($stale as $user) {
-            $this->removeUser($pdo, (int) $user['id'], (int) $user['room_id'], (string) $user['name']);
+        $path = $this->ratePath($user);
+        $dir = dirname($path);
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0755, true);
         }
+        $bucket = $this->readRateBucket($user);
+        $bucket[] = time();
+        file_put_contents($path, json_encode($bucket), LOCK_EX);
+    }
 
+    /**
+     * @param array{token: string, roomId: int} $user
+     */
+    private function ratePath(array $user): string
+    {
+        $token = preg_replace('/[^a-f0-9]/', '', (string) $user['token']);
+
+        return $this->store->root() . '/rooms/' . (int) $user['roomId'] . '/rate/' . $token . '.json';
+    }
+
+    private function expireStaleUsers(): void
+    {
+        $removed = $this->store->expireStale(self::USER_TTL_SECONDS);
+        foreach ($removed as $user) {
+            $this->store->appendEvent((int) $user['roomId'], [
+                'type' => 'leave',
+                'name' => (string) $user['name'],
+                'message' => null,
+            ]);
+        }
         $this->lastExpireAt = time();
     }
 
-    private function expireStaleUsersThrottled(PDO $pdo): void
+    private function expireStaleUsersThrottled(): void
     {
         if ((time() - $this->lastExpireAt) < self::EXPIRE_EVERY_SECONDS) {
             return;
         }
-
-        $this->expireStaleUsers($pdo);
+        $this->expireStaleUsers();
     }
 
-    private function removeUser(PDO $pdo, int $userId, int $roomId, string $name): void
+    private function touchThrottled(string $token): void
     {
-        $stmt = $pdo->prepare('DELETE FROM chat_users WHERE id = :id');
-        $stmt->execute([':id' => $userId]);
-        $this->insertEvent($pdo, $roomId, 'leave', $name, null);
-    }
-
-    private function insertEvent(PDO $pdo, int $roomId, string $type, string $name, ?string $message): int
-    {
-        $stmt = $pdo->prepare(
-            'INSERT INTO chat_events (room_id, type, user_name, message)
-             VALUES (:room_id, :type, :name, :message)'
-        );
-        $stmt->execute([
-            ':room_id' => $roomId,
-            ':type' => $type,
-            ':name' => $name,
-            ':message' => $message,
-        ]);
-
-        return (int) $pdo->lastInsertId();
-    }
-
-    /**
-     * @return list<array<string, mixed>>
-     */
-    private function history(PDO $pdo, int $roomId): array
-    {
-        $stmt = $pdo->prepare(
-            'SELECT id, type, user_name, message, created_at
-             FROM chat_events
-             WHERE room_id = :room_id AND type IN (\'join\', \'message\', \'leave\')
-             ORDER BY id DESC
-             LIMIT ' . self::HISTORY_LIMIT
-        );
-        $stmt->execute([':room_id' => $roomId]);
-        $rows = array_reverse($stmt->fetchAll());
-
-        return array_map([$this, 'mapEvent'], $rows);
-    }
-
-    /**
-     * @return array{ok: bool, events: list<array<string, mixed>>, since: int}
-     */
-    private function eventsSince(PDO $pdo, int $roomId, int $since): array
-    {
-        $stmt = $pdo->prepare(
-            'SELECT id, type, user_name, message, created_at
-             FROM chat_events
-             WHERE room_id = :room_id AND id > :since AND type IN (\'join\', \'message\', \'leave\')
-             ORDER BY id ASC
-             LIMIT 100'
-        );
-        $stmt->execute([':room_id' => $roomId, ':since' => max(0, $since)]);
-        $rows = $stmt->fetchAll();
-
-        $events = [];
-        $latest = $since;
-        foreach ($rows as $row) {
-            $id = (int) $row['id'];
-            $latest = max($latest, $id);
-            $events[] = $this->mapEvent($row);
+        if ((time() - $this->lastTouchAt) < self::TOUCH_EVERY_SECONDS) {
+            return;
         }
-
-        return [
-            'ok' => true,
-            'events' => $events,
-            'since' => $latest > 0 ? $latest : $this->latestEventId($pdo, $roomId),
-        ];
-    }
-
-    /**
-     * @param array<string, mixed> $row
-     * @return array<string, mixed>
-     */
-    private function mapEvent(array $row): array
-    {
-        return [
-            'id' => (int) $row['id'],
-            'type' => (string) $row['type'],
-            'name' => (string) $row['user_name'],
-            'message' => $row['message'] !== null ? (string) $row['message'] : null,
-            'createdAt' => (string) $row['created_at'],
-        ];
-    }
-
-    /**
-     * @return list<string>
-     */
-    private function onlineNames(PDO $pdo, int $roomId): array
-    {
-        $stmt = $pdo->prepare('SELECT name FROM chat_users WHERE room_id = :room_id ORDER BY name ASC');
-        $stmt->execute([':room_id' => $roomId]);
-        $names = [];
-        foreach ($stmt->fetchAll() as $row) {
-            $names[] = (string) $row['name'];
-        }
-
-        $this->lastPresenceAt = time();
-
-        return $names;
+        $this->store->touchPresence($token);
+        $this->lastTouchAt = time();
     }
 
     /**
      * @return list<string>|null
      */
-    private function onlineNamesThrottled(PDO $pdo, int $roomId, bool $force): ?array
+    private function onlineThrottled(int $roomId, bool $force): ?array
     {
         if (!$force && (time() - $this->lastPresenceAt) < self::PRESENCE_EVERY_SECONDS) {
             return null;
         }
+        $this->lastPresenceAt = time();
 
-        return $this->onlineNames($pdo, $roomId);
+        return $this->store->onlineNames($roomId);
     }
 
-    private function latestEventId(PDO $pdo, int $roomId): int
+    /**
+     * File-first history; optionally top up from DB archive after hourly flush.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function history(int $roomId, ?PDO $pdo = null): array
     {
-        $stmt = $pdo->prepare('SELECT COALESCE(MAX(id), 0) AS max_id FROM chat_events WHERE room_id = :room_id');
-        $stmt->execute([':room_id' => $roomId]);
+        $fileHistory = $this->store->history($roomId, self::HISTORY_LIMIT);
+        if (count($fileHistory) >= self::HISTORY_LIMIT || $pdo === null) {
+            return $fileHistory;
+        }
 
-        return (int) $stmt->fetchColumn();
+        try {
+            $need = self::HISTORY_LIMIT - count($fileHistory);
+            $stmt = $pdo->prepare(
+                'SELECT id, type, user_name, message, created_at
+                 FROM chat_events
+                 WHERE room_id = :room_id AND type IN (\'join\', \'message\', \'leave\')
+                 ORDER BY id DESC
+                 LIMIT ' . (int) $need
+            );
+            $stmt->execute([':room_id' => $roomId]);
+            $dbRows = array_reverse($stmt->fetchAll());
+            $dbMapped = [];
+            foreach ($dbRows as $row) {
+                // Negative ids = archived DB rows so they never collide with live file seq / since cursors.
+                $dbMapped[] = [
+                    'id' => -1 * (int) $row['id'],
+                    'type' => (string) $row['type'],
+                    'name' => (string) $row['user_name'],
+                    'message' => $row['message'] !== null ? (string) $row['message'] : null,
+                    'createdAt' => (string) $row['created_at'],
+                ];
+            }
+
+            // Prefer chronological: older DB archive then newer file buffer.
+            return array_slice(array_merge($dbMapped, $fileHistory), -self::HISTORY_LIMIT);
+        } catch (Throwable $e) {
+            error_log('[chat-api] history db: ' . $e->getMessage());
+
+            return $fileHistory;
+        }
     }
 
     /**
