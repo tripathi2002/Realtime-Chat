@@ -6,10 +6,7 @@
     <meta name="theme-color" content="#009bdf" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)" />
     <meta name="robots" content="noindex,nofollow" />
-    <meta
-      name="description"
-      content="v-chat — a realtime group chat by Vibhu Tripathi."
-    />
+    <meta name="description" content="v-chat — realtime group chat by Vibhu Tripathi." />
     <title>v-chat</title>
     <link rel="icon" href="images/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -39,54 +36,85 @@
               <span class="status__label">Offline</span>
             </span>
             <span class="site-header__user" id="userBadge" hidden></span>
-            <button
-              class="icon-btn"
-              id="muteBtn"
-              type="button"
-              aria-pressed="false"
-              title="Mute notifications"
-            >
-              🔊
-            </button>
-            <button
-              class="icon-btn"
-              id="themeBtn"
-              type="button"
-              aria-pressed="false"
-              title="Toggle dark mode"
-            >
-              ☾
-            </button>
+            <button class="btn btn--outline btn--small" id="logoutBtn" type="button" hidden>Log out</button>
+            <button class="icon-btn" id="muteBtn" type="button" aria-pressed="false" title="Mute notifications">🔊</button>
+            <button class="icon-btn" id="themeBtn" type="button" aria-pressed="false" title="Toggle dark mode">☾</button>
           </div>
         </div>
       </header>
 
       <main class="site-main">
-        <section class="join" id="joinPanel">
-          <div class="join__card">
-            <p class="eyebrow">Realtime chat</p>
+        <section class="panel" id="authPanel">
+          <div class="card">
+            <p class="eyebrow">Welcome</p>
             <div class="hero__rule" aria-hidden="true"></div>
-            <h1 class="join__title">Join the room</h1>
-            <p class="join__lead">
-              Pick a unique display name. Messages stream live over a persistent connection.
-            </p>
+            <h1 class="card__title" id="authTitle">Sign in</h1>
+            <p class="card__lead" id="authLead">Sign in to create rooms and chat with a unique user ID.</p>
 
-            <form class="join__form" id="joinForm" novalidate>
-              <div class="field">
-                <label for="nameInput">Display name <span aria-hidden="true">*</span></label>
-                <input
-                  id="nameInput"
-                  name="name"
-                  type="text"
-                  maxlength="100"
-                  autocomplete="nickname"
-                  placeholder="e.g. Vibhu"
-                  required
-                />
+            <div class="tabs" role="tablist">
+              <button class="tabs__btn is-active" type="button" data-auth-tab="login" id="tabLogin">Log in</button>
+              <button class="tabs__btn" type="button" data-auth-tab="signup" id="tabSignup">Sign up</button>
+            </div>
+
+            <form class="stack" id="authForm" novalidate>
+              <div class="field" id="displayNameField" hidden>
+                <label for="displayNameInput">Display name <span aria-hidden="true">*</span></label>
+                <input id="displayNameInput" name="displayName" type="text" maxlength="100" autocomplete="nickname" />
               </div>
-              <p class="banner banner--error" id="joinError" hidden role="alert"></p>
-              <button class="btn btn--primary" id="joinBtn" type="submit">Join chat</button>
+              <div class="field">
+                <label for="emailInput">Email <span aria-hidden="true">*</span></label>
+                <input id="emailInput" name="email" type="email" autocomplete="email" required />
+              </div>
+              <div class="field">
+                <label for="passwordInput">Password <span aria-hidden="true">*</span></label>
+                <input id="passwordInput" name="password" type="password" autocomplete="current-password" minlength="8" required />
+              </div>
+              <p class="banner banner--error" id="authError" hidden role="alert"></p>
+              <button class="btn btn--primary" id="authBtn" type="submit">Log in</button>
             </form>
+          </div>
+        </section>
+
+        <section class="panel" id="homePanel" hidden>
+          <div class="card card--wide">
+            <div class="card__head">
+              <div>
+                <p class="eyebrow">Your workspace</p>
+                <h1 class="card__title">Chat rooms</h1>
+                <p class="card__lead">
+                  Signed in as <strong id="homeUserName"></strong>
+                  · ID <code id="homeUserId"></code>
+                </p>
+              </div>
+            </div>
+
+            <div class="home-grid">
+              <form class="stack home-box" id="createRoomForm">
+                <h2 class="home-box__title">Create a room</h2>
+                <div class="field">
+                  <label for="roomNameInput">Room name</label>
+                  <input id="roomNameInput" type="text" maxlength="100" placeholder="e.g. Project standup" required />
+                </div>
+                <p class="banner banner--error" id="createRoomError" hidden role="alert"></p>
+                <button class="btn btn--primary" id="createRoomBtn" type="submit">Create room</button>
+              </form>
+
+              <form class="stack home-box" id="openRoomForm">
+                <h2 class="home-box__title">Open with code</h2>
+                <div class="field">
+                  <label for="roomCodeInput">Room code</label>
+                  <input id="roomCodeInput" type="text" maxlength="12" placeholder="e.g. AB12CD34" required />
+                </div>
+                <p class="banner banner--error" id="openRoomError" hidden role="alert"></p>
+                <button class="btn btn--outline" id="openRoomBtn" type="submit">Join room</button>
+              </form>
+            </div>
+
+            <div class="room-list-wrap">
+              <h2 class="home-box__title">Your rooms</h2>
+              <ul class="room-list" id="roomList"></ul>
+              <p class="muted" id="roomListEmpty">No rooms yet — create one to get a shareable link.</p>
+            </div>
           </div>
         </section>
 
@@ -95,26 +123,19 @@
             <div class="chat__head">
               <div class="chat__head-main">
                 <p class="eyebrow">Live room</p>
-                <h2 class="chat__title">Group chat</h2>
+                <h2 class="chat__title" id="chatRoomTitle">Group chat</h2>
                 <p class="chat__presence" id="presenceLabel">Nobody else online</p>
               </div>
               <div class="chat__head-actions">
                 <span class="site-header__user site-header__user--mobile" id="userBadgeMobile" hidden></span>
+                <button class="btn btn--outline btn--small" id="copyLinkBtn" type="button">Copy link</button>
                 <button class="btn btn--outline btn--small" id="leaveBtn" type="button">Leave</button>
               </div>
             </div>
 
             <div class="chat__stream-wrap">
-              <div
-                class="chat__messages"
-                id="messageContainer"
-                role="log"
-                aria-live="polite"
-                aria-relevant="additions"
-              >
-                <div class="empty" id="emptyState">
-                  <p>No messages yet — say hi 👋</p>
-                </div>
+              <div class="chat__messages" id="messageContainer" role="log" aria-live="polite" aria-relevant="additions">
+                <div class="empty" id="emptyState"><p>No messages yet — say hi 👋</p></div>
               </div>
               <button class="jump" id="jumpBtn" type="button" hidden>↓ New messages</button>
             </div>
@@ -122,17 +143,8 @@
             <form class="composer" id="send-container" autocomplete="off">
               <label class="sr-only" for="messageInp">Message</label>
               <div class="composer__box">
-                <textarea
-                  id="messageInp"
-                  name="messageInp"
-                  rows="1"
-                  maxlength="2000"
-                  placeholder="Write a message…"
-                  disabled
-                ></textarea>
-                <div class="composer__meta">
-                  <span id="charCount">0 / 2000</span>
-                </div>
+                <textarea id="messageInp" name="messageInp" rows="1" maxlength="2000" placeholder="Write a message…" disabled></textarea>
+                <div class="composer__meta"><span id="charCount">0 / 2000</span></div>
               </div>
               <button class="btn btn--primary composer__send" id="sendBtn" type="submit" disabled aria-label="Send">
                 <span class="composer__send-label">Send</span>
