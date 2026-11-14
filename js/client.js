@@ -280,8 +280,12 @@
   };
 
   const resizeComposer = () => {
+    const maxHeight = 128;
+    messageInput.classList.remove('is-scrollable');
     messageInput.style.height = 'auto';
-    messageInput.style.height = `${Math.min(messageInput.scrollHeight, 128)}px`;
+    const nextHeight = Math.min(Math.max(messageInput.scrollHeight, 44), maxHeight);
+    messageInput.style.height = `${nextHeight}px`;
+    messageInput.classList.toggle('is-scrollable', messageInput.scrollHeight > maxHeight);
     charCount.textContent = `${messageInput.value.length} / ${MAX_CHARS}`;
     sendBtn.disabled = messageInput.disabled || !messageInput.value.trim();
   };
