@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 final class Database
 {
-    private const SCHEMA_VERSION = 1;
+    private const SCHEMA_VERSION = 2;
 
     private static ?PDO $pdo = null;
 
@@ -33,8 +33,6 @@ final class Database
             throw new RuntimeException('Database name and user are required in config.php.');
         }
 
-        // On Hostinger, PHP and MySQL share a machine — prefer localhost/socket over the
-        // remote hostname so we do not burn max_connections_per_hour on every request.
         if (self::isRemoteHostingerHost($host)) {
             $host = 'localhost';
         }
@@ -46,11 +44,9 @@ final class Database
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
                 PDO::ATTR_EMULATE_PREPARES => false,
-                // Reuse connections across PHP-FPM workers to stay under Hostinger hourly caps.
                 PDO::ATTR_PERSISTENT => $persistent,
             ]);
         } catch (PDOException $e) {
-            // Persistent handles can go stale after MySQL restarts; retry once cleanly.
             if ($persistent) {
                 self::$pdo = new PDO($dsn, $user, $pass, [
                     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
@@ -79,9 +75,52 @@ final class Database
         }
 
         $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS accounts (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                public_id VARCHAR(32) NOT NULL,
+                email VARCHAR(255) NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                display_name VARCHAR(100) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_accounts_public_id (public_id),
+                UNIQUE KEY uq_accounts_email (email)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS auth_sessions (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                token CHAR(64) NOT NULL,
+                account_id BIGINT UNSIGNED NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_auth_sessions_token (token),
+                KEY idx_auth_sessions_account (account_id),
+                KEY idx_auth_sessions_expires (expires_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS rooms (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                code VARCHAR(12) NOT NULL,
+                name VARCHAR(100) NOT NULL,
+                created_by BIGINT UNSIGNED NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_rooms_code (code),
+                KEY idx_rooms_created_by (created_by)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+
+        $pdo->exec(
             'CREATE TABLE IF NOT EXISTS chat_users (
                 id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                 token CHAR(64) NOT NULL,
+                room_id BIGINT UNSIGNED NOT NULL,
+                account_id BIGINT UNSIGNED NOT NULL,
                 name VARCHAR(100) NOT NULL,
                 name_key VARCHAR(100) NOT NULL,
                 last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -89,31 +128,54 @@ final class Database
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (id),
                 UNIQUE KEY uq_chat_users_token (token),
-                UNIQUE KEY uq_chat_users_name_key (name_key),
-                KEY idx_chat_users_last_seen (last_seen_at)
+                UNIQUE KEY uq_chat_users_room_account (room_id, account_id),
+                KEY idx_chat_users_room_seen (room_id, last_seen_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
         );
 
         $pdo->exec(
             'CREATE TABLE IF NOT EXISTS chat_events (
                 id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                room_id BIGINT UNSIGNED NOT NULL,
                 type ENUM("join", "message", "leave", "typing") NOT NULL,
                 user_name VARCHAR(100) NOT NULL,
                 message TEXT NULL,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (id),
-                KEY idx_chat_events_id (id),
+                KEY idx_chat_events_room_id (room_id, id),
                 KEY idx_chat_events_type_id (type, id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
         );
 
+        // Rolling upgrades from v1 anonymous schema.
+        self::ensureColumn($pdo, 'chat_users', 'room_id', 'BIGINT UNSIGNED NULL AFTER token');
+        self::ensureColumn($pdo, 'chat_users', 'account_id', 'BIGINT UNSIGNED NULL AFTER room_id');
         self::ensureColumn($pdo, 'chat_users', 'name_key', 'VARCHAR(100) NOT NULL DEFAULT \'\' AFTER name');
         self::ensureColumn($pdo, 'chat_users', 'last_message_at', 'TIMESTAMP NULL DEFAULT NULL AFTER last_seen_at');
-        $pdo->exec("UPDATE chat_users SET name_key = LOWER(name) WHERE name_key = '' OR name_key IS NULL");
-        self::ensureIndex($pdo, 'chat_users', 'uq_chat_users_name_key', 'UNIQUE KEY uq_chat_users_name_key (name_key)');
+        self::ensureColumn($pdo, 'chat_events', 'room_id', 'BIGINT UNSIGNED NULL AFTER id');
+        self::ensureIndex($pdo, 'chat_users', 'uq_chat_users_room_account', 'UNIQUE KEY uq_chat_users_room_account (room_id, account_id)');
+        self::ensureIndex($pdo, 'chat_events', 'idx_chat_events_room_id', 'KEY idx_chat_events_room_id (room_id, id)');
+        // v1 used a global unique display name; rooms allow the same name in different rooms.
+        self::dropIndexIfExists($pdo, 'chat_users', 'uq_chat_users_name_key');
 
         @touch($marker);
         self::$schemaReady = true;
+    }
+
+    private static function dropIndexIfExists(PDO $pdo, string $table, string $index): void
+    {
+        $stmt = $pdo->prepare(
+            'SELECT COUNT(*) FROM information_schema.STATISTICS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table AND INDEX_NAME = :index'
+        );
+        $stmt->execute([':table' => $table, ':index' => $index]);
+        if ((int) $stmt->fetchColumn() > 0) {
+            try {
+                $pdo->exec("ALTER TABLE {$table} DROP INDEX {$index}");
+            } catch (Throwable $e) {
+                error_log('[chat-api] index drop: ' . $e->getMessage());
+            }
+        }
     }
 
     private static function isRemoteHostingerHost(string $host): bool
@@ -145,7 +207,6 @@ final class Database
             try {
                 $pdo->exec("ALTER TABLE {$table} ADD {$definition}");
             } catch (Throwable $e) {
-                // Ignore duplicate-name collisions during rolling deploys.
                 error_log('[chat-api] index ensure: ' . $e->getMessage());
             }
         }

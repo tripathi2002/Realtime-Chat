@@ -8,7 +8,6 @@ final class ChatService
     private const HISTORY_LIMIT = 80;
     private const RATE_LIMIT_MS = 500;
     private const RATE_LIMIT_PER_MINUTE = 30;
-    // Longer streams = fewer reconnects = fewer MySQL connects under Hostinger hourly caps.
     private const STREAM_SECONDS = 55;
     private const STREAM_SLEEP_US = 1000000;
     private const EXPIRE_EVERY_SECONDS = 30;
@@ -19,8 +18,11 @@ final class ChatService
     private int $lastTouchAt = 0;
     private int $lastPresenceAt = 0;
 
-    public function __construct(private readonly array $config)
-    {
+    public function __construct(
+        private readonly array $config,
+        private readonly AuthService $auth,
+        private readonly RoomService $rooms,
+    ) {
     }
 
     public function health(): array
@@ -35,53 +37,84 @@ final class ChatService
     }
 
     /**
-     * @return array{ok: bool, token?: string, name?: string, since?: int, history?: list<array<string, mixed>>, online?: list<string>, errors?: array<string, string>, message?: string}
+     * @return array{ok: bool, token?: string, name?: string, publicId?: string, room?: array<string, mixed>, since?: int, history?: list<array<string, mixed>>, online?: list<string>, errors?: array<string, string>, message?: string}
      */
-    public function join(array $input): array
+    public function join(string $authToken, array $input): array
     {
-        $name = $this->cleanName($input['name'] ?? '');
-        if ($name === '' || mb_strlen($name) > 100) {
-            return ['ok' => false, 'errors' => ['name' => 'Name is required (max 100 chars).']];
+        $roomCode = strtoupper(trim((string) ($input['roomCode'] ?? $input['room'] ?? '')));
+        if ($roomCode === '') {
+            return ['ok' => false, 'errors' => ['roomCode' => 'Room code is required.']];
         }
 
-        $nameKey = mb_strtolower($name);
-
         try {
+            $account = $this->auth->requireAccount($authToken);
             $pdo = $this->pdo();
-            $this->expireStaleUsers($pdo);
-
-            $exists = $pdo->prepare('SELECT id FROM chat_users WHERE name_key = :name_key LIMIT 1');
-            $exists->execute([':name_key' => $nameKey]);
-            if ($exists->fetch()) {
-                return ['ok' => false, 'errors' => ['name' => 'That name is already in use. Pick another.']];
+            $room = $this->rooms->requireRoom($pdo, $roomCode);
+            if ($room === null) {
+                return ['ok' => false, 'message' => 'Room not found.'];
             }
 
-            $token = bin2hex(random_bytes(32));
-            $stmt = $pdo->prepare(
-                'INSERT INTO chat_users (token, name, name_key, last_seen_at)
-                 VALUES (:token, :name, :name_key, NOW())'
-            );
-            $stmt->execute([
-                ':token' => $token,
-                ':name' => $name,
-                ':name_key' => $nameKey,
-            ]);
+            $this->expireStaleUsers($pdo);
 
-            $this->insertEvent($pdo, 'join', $name, null);
-            $history = $this->history($pdo);
-            $since = $this->latestEventId($pdo);
+            $roomId = (int) $room['id'];
+            $accountId = (int) $account['id'];
+            $name = (string) $account['display_name'];
+            $nameKey = mb_strtolower($name);
+
+            // One presence row per account per room — refresh token if already inside.
+            $existing = $pdo->prepare(
+                'SELECT id FROM chat_users WHERE room_id = :room_id AND account_id = :account_id LIMIT 1'
+            );
+            $existing->execute([':room_id' => $roomId, ':account_id' => $accountId]);
+            $row = $existing->fetch();
+
+            $token = bin2hex(random_bytes(32));
+            if (is_array($row)) {
+                $upd = $pdo->prepare(
+                    'UPDATE chat_users
+                     SET token = :token, name = :name, name_key = :name_key, last_seen_at = NOW()
+                     WHERE id = :id'
+                );
+                $upd->execute([
+                    ':token' => $token,
+                    ':name' => $name,
+                    ':name_key' => $nameKey,
+                    ':id' => (int) $row['id'],
+                ]);
+            } else {
+                $ins = $pdo->prepare(
+                    'INSERT INTO chat_users (token, room_id, account_id, name, name_key, last_seen_at)
+                     VALUES (:token, :room_id, :account_id, :name, :name_key, NOW())'
+                );
+                $ins->execute([
+                    ':token' => $token,
+                    ':room_id' => $roomId,
+                    ':account_id' => $accountId,
+                    ':name' => $name,
+                    ':name_key' => $nameKey,
+                ]);
+                $this->insertEvent($pdo, $roomId, 'join', $name, null);
+            }
 
             return [
                 'ok' => true,
                 'token' => $token,
                 'name' => $name,
-                'since' => $since,
-                'history' => $history,
-                'online' => $this->onlineNames($pdo),
+                'publicId' => (string) $account['public_id'],
+                'room' => [
+                    'code' => (string) $room['code'],
+                    'name' => (string) $room['name'],
+                    'path' => '?room=' . rawurlencode((string) $room['code']),
+                ],
+                'since' => $this->latestEventId($pdo, $roomId),
+                'history' => $this->history($pdo, $roomId),
+                'online' => $this->onlineNames($pdo, $roomId),
             ];
+        } catch (InvalidArgumentException $e) {
+            return ['ok' => false, 'message' => $e->getMessage()];
         } catch (PDOException $e) {
             if ((int) ($e->errorInfo[1] ?? 0) === 1062) {
-                return ['ok' => false, 'errors' => ['name' => 'That name is already in use. Pick another.']];
+                return ['ok' => false, 'message' => 'You are already joining this room. Try again.'];
             }
             error_log('[chat-api] join: ' . $e->getMessage());
 
@@ -94,22 +127,33 @@ final class ChatService
     }
 
     /**
-     * @return array{ok: bool, name?: string, since?: int, history?: list<array<string, mixed>>, online?: list<string>, message?: string}
+     * @return array{ok: bool, name?: string, publicId?: string, room?: array<string, mixed>, since?: int, history?: list<array<string, mixed>>, online?: list<string>, message?: string}
      */
     public function resume(string $token): array
     {
         try {
             $pdo = $this->pdo();
             $user = $this->requireUser($pdo, $token);
+            $roomId = (int) $user['room_id'];
             $this->touchUser($pdo, (int) $user['id']);
             $this->expireStaleUsers($pdo);
+
+            $roomStmt = $pdo->prepare('SELECT code, name FROM rooms WHERE id = :id LIMIT 1');
+            $roomStmt->execute([':id' => $roomId]);
+            $room = $roomStmt->fetch();
 
             return [
                 'ok' => true,
                 'name' => (string) $user['name'],
-                'since' => $this->latestEventId($pdo),
-                'history' => $this->history($pdo),
-                'online' => $this->onlineNames($pdo),
+                'publicId' => (string) ($user['public_id'] ?? ''),
+                'room' => is_array($room) ? [
+                    'code' => (string) $room['code'],
+                    'name' => (string) $room['name'],
+                    'path' => '?room=' . rawurlencode((string) $room['code']),
+                ] : null,
+                'since' => $this->latestEventId($pdo, $roomId),
+                'history' => $this->history($pdo, $roomId),
+                'online' => $this->onlineNames($pdo, $roomId),
             ];
         } catch (InvalidArgumentException $e) {
             return ['ok' => false, 'message' => $e->getMessage()];
@@ -134,13 +178,14 @@ final class ChatService
             $pdo = $this->pdo();
             $user = $this->requireUser($pdo, $token);
             $userId = (int) $user['id'];
+            $roomId = (int) $user['room_id'];
 
-            if (!$this->allowMessage($pdo, $userId)) {
+            if (!$this->allowMessage($pdo, $userId, $roomId, (string) $user['name'])) {
                 return ['ok' => false, 'message' => 'You are sending messages too quickly. Please wait a moment.'];
             }
 
             $this->touchUser($pdo, $userId);
-            $id = $this->insertEvent($pdo, 'message', (string) $user['name'], $message);
+            $id = $this->insertEvent($pdo, $roomId, 'message', (string) $user['name'], $message);
             $this->markMessageSent($pdo, $userId);
 
             return ['ok' => true, 'id' => $id];
@@ -165,7 +210,7 @@ final class ChatService
                 return ['ok' => true];
             }
 
-            $this->removeUser($pdo, (int) $user['id'], (string) $user['name']);
+            $this->removeUser($pdo, (int) $user['id'], (int) $user['room_id'], (string) $user['name']);
 
             return ['ok' => true];
         } catch (Throwable $e) {
@@ -183,14 +228,15 @@ final class ChatService
         try {
             $pdo = $this->pdo();
             $user = $this->requireUser($pdo, $token);
+            $roomId = (int) $user['room_id'];
             $this->touchUser($pdo, (int) $user['id']);
             $this->expireStaleUsers($pdo);
 
             $deadline = microtime(true) + ($wait ? self::STREAM_SECONDS : 0);
             do {
-                $result = $this->eventsSince($pdo, $since);
+                $result = $this->eventsSince($pdo, $roomId, $since);
                 if ($result['events'] !== [] || !$wait) {
-                    $result['online'] = $this->onlineNamesThrottled($pdo, true);
+                    $result['online'] = $this->onlineNamesThrottled($pdo, $roomId, true);
 
                     return $result;
                 }
@@ -202,8 +248,8 @@ final class ChatService
             return [
                 'ok' => true,
                 'events' => [],
-                'since' => $since > 0 ? $since : $this->latestEventId($pdo),
-                'online' => $this->onlineNamesThrottled($pdo, true),
+                'since' => $since > 0 ? $since : $this->latestEventId($pdo, $roomId),
+                'online' => $this->onlineNamesThrottled($pdo, $roomId, true),
             ];
         } catch (InvalidArgumentException $e) {
             return ['ok' => false, 'message' => $e->getMessage()];
@@ -232,6 +278,7 @@ final class ChatService
         try {
             $pdo = $this->pdo();
             $user = $this->requireUser($pdo, $token);
+            $roomId = (int) $user['room_id'];
             $this->touchUser($pdo, (int) $user['id']);
         } catch (InvalidArgumentException $e) {
             $this->sse('error', ['ok' => false, 'message' => $e->getMessage()]);
@@ -248,7 +295,7 @@ final class ChatService
         $this->sse('ready', [
             'ok' => true,
             'since' => $cursor,
-            'online' => $this->onlineNamesThrottled($pdo, true),
+            'online' => $this->onlineNamesThrottled($pdo, $roomId, true),
         ]);
 
         while (time() < $deadline) {
@@ -259,13 +306,13 @@ final class ChatService
             try {
                 $this->expireStaleUsersThrottled($pdo);
                 $this->touchUserThrottled($pdo, (int) $user['id']);
-                $batch = $this->eventsSince($pdo, $cursor);
+                $batch = $this->eventsSince($pdo, $roomId, $cursor);
                 if ($batch['events'] !== []) {
                     $this->sse('events', [
                         'ok' => true,
                         'events' => $batch['events'],
                         'since' => $batch['since'],
-                        'online' => $this->onlineNamesThrottled($pdo, true),
+                        'online' => $this->onlineNamesThrottled($pdo, $roomId, true),
                     ]);
                     $cursor = (int) $batch['since'];
                 } else {
@@ -273,7 +320,7 @@ final class ChatService
                         'ok' => true,
                         'since' => $cursor,
                     ];
-                    $online = $this->onlineNamesThrottled($pdo, false);
+                    $online = $this->onlineNamesThrottled($pdo, $roomId, false);
                     if ($online !== null) {
                         $payload['online'] = $online;
                     }
@@ -302,7 +349,7 @@ final class ChatService
             $this->touchUser($pdo, (int) $user['id']);
             $this->expireStaleUsers($pdo);
 
-            return ['ok' => true, 'online' => $this->onlineNames($pdo)];
+            return ['ok' => true, 'online' => $this->onlineNames($pdo, (int) $user['room_id'])];
         } catch (InvalidArgumentException $e) {
             return ['ok' => false, 'message' => $e->getMessage()];
         } catch (Throwable $e) {
@@ -321,7 +368,7 @@ final class ChatService
     }
 
     /**
-     * @return array{id: int|string, token: string, name: string, name_key?: string}
+     * @return array{id: int|string, token: string, name: string, room_id: int|string, account_id?: int|string, public_id?: string}
      */
     private function requireUser(PDO $pdo, string $token): array
     {
@@ -334,7 +381,7 @@ final class ChatService
     }
 
     /**
-     * @return array{id: int|string, token: string, name: string}|null
+     * @return array{id: int|string, token: string, name: string, room_id: int|string, account_id?: int|string, public_id?: string}|null
      */
     private function findUser(PDO $pdo, string $token): ?array
     {
@@ -342,7 +389,13 @@ final class ChatService
             return null;
         }
 
-        $stmt = $pdo->prepare('SELECT id, token, name, name_key FROM chat_users WHERE token = :token LIMIT 1');
+        $stmt = $pdo->prepare(
+            'SELECT cu.id, cu.token, cu.name, cu.room_id, cu.account_id, a.public_id
+             FROM chat_users cu
+             LEFT JOIN accounts a ON a.id = cu.account_id
+             WHERE cu.token = :token
+             LIMIT 1'
+        );
         $stmt->execute([':token' => $token]);
         $user = $stmt->fetch();
 
@@ -365,9 +418,9 @@ final class ChatService
         $this->touchUser($pdo, $userId);
     }
 
-    private function allowMessage(PDO $pdo, int $userId): bool
+    private function allowMessage(PDO $pdo, int $userId, int $roomId, string $name): bool
     {
-        $stmt = $pdo->prepare('SELECT name, last_message_at FROM chat_users WHERE id = :id LIMIT 1');
+        $stmt = $pdo->prepare('SELECT last_message_at FROM chat_users WHERE id = :id LIMIT 1');
         $stmt->execute([':id' => $userId]);
         $row = $stmt->fetch();
         if (!is_array($row)) {
@@ -383,10 +436,10 @@ final class ChatService
 
         $countStmt = $pdo->prepare(
             'SELECT COUNT(*) FROM chat_events
-             WHERE type = \'message\' AND user_name = :name
+             WHERE room_id = :room_id AND type = \'message\' AND user_name = :name
                AND created_at >= (NOW() - INTERVAL 1 MINUTE)'
         );
-        $countStmt->execute([':name' => (string) $row['name']]);
+        $countStmt->execute([':room_id' => $roomId, ':name' => $name]);
         if ((int) $countStmt->fetchColumn() >= self::RATE_LIMIT_PER_MINUTE) {
             return false;
         }
@@ -403,14 +456,14 @@ final class ChatService
     private function expireStaleUsers(PDO $pdo): void
     {
         $stmt = $pdo->prepare(
-            'SELECT id, name FROM chat_users
+            'SELECT id, room_id, name FROM chat_users
              WHERE last_seen_at < (NOW() - INTERVAL ' . self::USER_TTL_SECONDS . ' SECOND)'
         );
         $stmt->execute();
         $stale = $stmt->fetchAll();
 
         foreach ($stale as $user) {
-            $this->removeUser($pdo, (int) $user['id'], (string) $user['name']);
+            $this->removeUser($pdo, (int) $user['id'], (int) $user['room_id'], (string) $user['name']);
         }
 
         $this->lastExpireAt = time();
@@ -425,19 +478,21 @@ final class ChatService
         $this->expireStaleUsers($pdo);
     }
 
-    private function removeUser(PDO $pdo, int $userId, string $name): void
+    private function removeUser(PDO $pdo, int $userId, int $roomId, string $name): void
     {
         $stmt = $pdo->prepare('DELETE FROM chat_users WHERE id = :id');
         $stmt->execute([':id' => $userId]);
-        $this->insertEvent($pdo, 'leave', $name, null);
+        $this->insertEvent($pdo, $roomId, 'leave', $name, null);
     }
 
-    private function insertEvent(PDO $pdo, string $type, string $name, ?string $message): int
+    private function insertEvent(PDO $pdo, int $roomId, string $type, string $name, ?string $message): int
     {
         $stmt = $pdo->prepare(
-            'INSERT INTO chat_events (type, user_name, message) VALUES (:type, :name, :message)'
+            'INSERT INTO chat_events (room_id, type, user_name, message)
+             VALUES (:room_id, :type, :name, :message)'
         );
         $stmt->execute([
+            ':room_id' => $roomId,
             ':type' => $type,
             ':name' => $name,
             ':message' => $message,
@@ -449,16 +504,16 @@ final class ChatService
     /**
      * @return list<array<string, mixed>>
      */
-    private function history(PDO $pdo): array
+    private function history(PDO $pdo, int $roomId): array
     {
         $stmt = $pdo->prepare(
             'SELECT id, type, user_name, message, created_at
              FROM chat_events
-             WHERE type IN (\'join\', \'message\', \'leave\')
+             WHERE room_id = :room_id AND type IN (\'join\', \'message\', \'leave\')
              ORDER BY id DESC
              LIMIT ' . self::HISTORY_LIMIT
         );
-        $stmt->execute();
+        $stmt->execute([':room_id' => $roomId]);
         $rows = array_reverse($stmt->fetchAll());
 
         return array_map([$this, 'mapEvent'], $rows);
@@ -467,16 +522,16 @@ final class ChatService
     /**
      * @return array{ok: bool, events: list<array<string, mixed>>, since: int}
      */
-    private function eventsSince(PDO $pdo, int $since): array
+    private function eventsSince(PDO $pdo, int $roomId, int $since): array
     {
         $stmt = $pdo->prepare(
             'SELECT id, type, user_name, message, created_at
              FROM chat_events
-             WHERE id > :since AND type IN (\'join\', \'message\', \'leave\')
+             WHERE room_id = :room_id AND id > :since AND type IN (\'join\', \'message\', \'leave\')
              ORDER BY id ASC
              LIMIT 100'
         );
-        $stmt->execute([':since' => max(0, $since)]);
+        $stmt->execute([':room_id' => $roomId, ':since' => max(0, $since)]);
         $rows = $stmt->fetchAll();
 
         $events = [];
@@ -490,7 +545,7 @@ final class ChatService
         return [
             'ok' => true,
             'events' => $events,
-            'since' => $latest > 0 ? $latest : $this->latestEventId($pdo),
+            'since' => $latest > 0 ? $latest : $this->latestEventId($pdo, $roomId),
         ];
     }
 
@@ -512,9 +567,10 @@ final class ChatService
     /**
      * @return list<string>
      */
-    private function onlineNames(PDO $pdo): array
+    private function onlineNames(PDO $pdo, int $roomId): array
     {
-        $stmt = $pdo->query('SELECT name FROM chat_users ORDER BY name ASC');
+        $stmt = $pdo->prepare('SELECT name FROM chat_users WHERE room_id = :room_id ORDER BY name ASC');
+        $stmt->execute([':room_id' => $roomId]);
         $names = [];
         foreach ($stmt->fetchAll() as $row) {
             $names[] = (string) $row['name'];
@@ -528,20 +584,21 @@ final class ChatService
     /**
      * @return list<string>|null
      */
-    private function onlineNamesThrottled(PDO $pdo, bool $force): ?array
+    private function onlineNamesThrottled(PDO $pdo, int $roomId, bool $force): ?array
     {
         if (!$force && (time() - $this->lastPresenceAt) < self::PRESENCE_EVERY_SECONDS) {
             return null;
         }
 
-        return $this->onlineNames($pdo);
+        return $this->onlineNames($pdo, $roomId);
     }
 
-    private function latestEventId(PDO $pdo): int
+    private function latestEventId(PDO $pdo, int $roomId): int
     {
-        $id = $pdo->query('SELECT COALESCE(MAX(id), 0) AS max_id FROM chat_events')->fetchColumn();
+        $stmt = $pdo->prepare('SELECT COALESCE(MAX(id), 0) AS max_id FROM chat_events WHERE room_id = :room_id');
+        $stmt->execute([':room_id' => $roomId]);
 
-        return (int) $id;
+        return (int) $stmt->fetchColumn();
     }
 
     /**
@@ -554,24 +611,12 @@ final class ChatService
         @flush();
     }
 
-    private function cleanName(mixed $value): string
-    {
-        if (!is_string($value)) {
-            return '';
-        }
-
-        $value = trim(preg_replace('/[\x00-\x1F\x7F]/u', '', $value) ?? '');
-
-        return mb_substr($value, 0, 100);
-    }
-
     private function cleanMessage(mixed $value): string
     {
         if (!is_string($value)) {
             return '';
         }
 
-        // Keep characters like "<" intact; XSS is avoided by textContent on the client.
         $value = str_replace("\0", '', $value);
         $value = trim($value);
 

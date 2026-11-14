@@ -1,22 +1,46 @@
 # Realtime Chat — PHP API
 
-PHP + MySQL chat backend for Hostinger. Live updates use **SSE** (`/stream`) with **long-poll** (`/poll?wait=1`) as fallback.
+PHP + MySQL chat backend for Hostinger.
 
-## Endpoints
+## Features
 
-| Method | Path | Purpose |
+- Signup / login with unique public user IDs (`u_########`)
+- Create rooms and join by code / shareable `?room=CODE` link
+- SSE live updates (`/stream`) + long-poll fallback
+- Room-scoped history, presence, rate limits
+
+## Auth
+
+| Method | Path | Notes |
 |---|---|---|
-| `GET` | `/` | Health |
-| `POST` | `/join` | Join with unique `{ "name" }` → token, history, online |
-| `GET` | `/resume` | Restore session (`X-Chat-Token`) |
-| `POST` | `/message` | Send `{ "message" }` (token header) |
-| `POST` | `/leave` | Leave room |
-| `GET` | `/stream?since=` | SSE event stream |
-| `GET` | `/poll?since=&wait=1` | Long-poll fallback |
-| `GET` | `/presence` | Online names |
+| `POST` | `/signup` | `{ email, password, displayName }` |
+| `POST` | `/login` | `{ email, password }` |
+| `POST` | `/logout` | header `X-Auth-Token` |
+| `GET` | `/me` | header `X-Auth-Token` |
 
-Auth: send `X-Chat-Token` header (not query string).
+## Rooms
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/rooms` | create `{ name }` |
+| `GET` | `/rooms` | list my rooms |
+| `GET` | `/rooms?code=ABCD1234` | room details |
+
+## Chat (room presence)
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/join` | `{ roomCode }` + `X-Auth-Token` → chat token |
+| `GET` | `/resume` | restore chat session (`X-Chat-Token`) |
+| `POST` | `/message` | `{ message }` |
+| `POST` | `/leave` | leave room presence |
+| `GET` | `/stream?since=` | SSE |
+| `GET` | `/poll?since=&wait=1` | long-poll |
+
+Headers:
+- `X-Auth-Token` — account session
+- `X-Chat-Token` — in-room presence session
 
 ## Deploy
 
-Push `php/api/v2` → FTP `sit/realtime-chat/api/v2/`. Create `config.php` on the server once.
+Push `php/api/v2` → `sit/realtime-chat/api/v2/`. Keep `config.php` on the server.
